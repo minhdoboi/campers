@@ -8,9 +8,13 @@ const TILE_SAND := 2
 const TILE_GRASS := 3
 const TILE_FOREST := 4
 const TILE_ROCK := 5
+## Asphalt car roads: X runs along grid ±x, Y along grid ±y (separate art).
+const TILE_ROAD_X := 6
+const TILE_ROAD_Y := 7
 # Directional ramps: each one rises toward a single neighbor and only
 # connects the two levels along that direction.
-const TILE_RAMP_FIRST := 6 # +x, then -x, -y, +y (matches RAMP_DIRS)
+const TILE_RAMP_FIRST := 8 # +x, then -x, -y, +y (matches RAMP_DIRS)
+const TILE_RAMP_COUNT := 4
 
 ## Direction to the higher neighbor for tile TILE_RAMP_FIRST + i.
 ## Order matches the frames in assets/tiles/ramps.png.
@@ -18,6 +22,8 @@ const RAMP_DIRS: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0,
 
 const MAX_LEVEL := 2
 const RAMP_CHANCE := 0.75
+## Chance a roadside shoulder gets a metal guardrail (blocks that cell only).
+const BARRIER_CHANCE := 0.12
 
 ## Parcel sky conditions rolled during generation. Cloudy and rainy both get
 ## drifting cloud shadows; rainy also spawns rain particles.
@@ -32,16 +38,21 @@ const DIRS: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), 
 static var use_debug_terrain := false
 
 
+static func is_road(tile: int) -> bool:
+	return tile == TILE_ROAD_X or tile == TILE_ROAD_Y
+
+
 static func is_ramp(tile: int) -> bool:
-	return tile >= TILE_RAMP_FIRST
+	return tile >= TILE_RAMP_FIRST and tile < TILE_RAMP_FIRST + TILE_RAMP_COUNT
 
 
 static func ramp_dir(tile: int) -> Vector2i:
 	return RAMP_DIRS[tile - TILE_RAMP_FIRST]
 
 
-## Returns {"tiles", "levels", "weather", "weather_seed"}. tiles/levels are
-## Arrays of PackedInt32Array indexed as grid[y][x].
+## Returns {"tiles", "levels", "barriers", "weather", "weather_seed"}.
+## tiles/levels are Arrays of PackedInt32Array indexed as grid[y][x].
+## barriers is an Array[Vector2i] of cells blocked by roadside fences.
 static func generate(width: int, height: int, seed_value: int) -> Dictionary:
 	var height_noise := FastNoiseLite.new()
 	height_noise.seed = seed_value
@@ -93,13 +104,17 @@ static func generate(width: int, height: int, seed_value: int) -> Dictionary:
 		tiles.append(tile_row)
 		levels.append(level_row)
 
+	# Roads first: straight asphalt on level 0, then rivers/ramps work around them.
+	var road_cells := _carve_roads(tiles, levels, width, height, rng)
 	_carve_rivers(tiles, levels, width, height, rng)
 	_smooth_levels(levels, width, height)
 	_place_ramps(tiles, levels, width, height, rng)
+	var barriers := _place_barriers(tiles, levels, road_cells, width, height, rng)
 	var avg_moisture := moisture_sum / float(moisture_count)
 	return {
 		"tiles": tiles,
 		"levels": levels,
+		"barriers": barriers,
 		"weather": _roll_weather(rng, avg_moisture),
 		"weather_seed": seed_value + 3000,
 	}
@@ -146,6 +161,9 @@ static func _carve_rivers(tiles: Array, levels: Array, width: int, height: int, 
 				var cell := Vector2i(c + o, t) if vertical else Vector2i(t, c + o)
 				if cell.x < 0 or cell.y < 0 or cell.x >= width or cell.y >= height:
 					continue
+				# Asphalt roads stay put — rivers pass under as a bridge span.
+				if is_road(tiles[cell.y][cell.x]):
+					continue
 				levels[cell.y][cell.x] = 0
 				var current: int = tiles[cell.y][cell.x]
 				if absi(o) == 2:
@@ -177,6 +195,79 @@ static func _smooth_levels(levels: Array, width: int, height: int) -> void:
 				if levels[y][x] > min_neighbor + 1:
 					levels[y][x] = min_neighbor + 1
 					changed = true
+
+
+## Carves 1-2 straight two-lane asphalt roads edge-to-edge on level 0.
+## Done before rivers so the pavement stays continuous (bridges over water).
+## Returns the road cells.
+static func _carve_roads(
+	tiles: Array, levels: Array, width: int, height: int, rng: RandomNumberGenerator
+) -> Array[Vector2i]:
+	var road_cells: Array[Vector2i] = []
+	var count := 2 if rng.randf() < 0.35 else 1
+	var used_axes := {}
+	for i in count:
+		var vertical := rng.randf() < 0.5
+		var length := height if vertical else width
+		var span := width if vertical else height
+		var c := rng.randi_range(2, span - 4)
+		# Keep a second road from overlapping the first.
+		var axis_key := ("v%d" if vertical else "h%d") % c
+		var attempts := 0
+		while used_axes.has(axis_key) and attempts < 8:
+			c = rng.randi_range(2, span - 4)
+			axis_key = ("v%d" if vertical else "h%d") % c
+			attempts += 1
+		used_axes[axis_key] = true
+		var road_tile := TILE_ROAD_Y if vertical else TILE_ROAD_X
+		for t in length:
+			for lane in 2:
+				var cell := Vector2i(c + lane, t) if vertical else Vector2i(t, c + lane)
+				if cell.x < 0 or cell.y < 0 or cell.x >= width or cell.y >= height:
+					continue
+				levels[cell.y][cell.x] = 0
+				tiles[cell.y][cell.x] = road_tile
+				if not road_cells.has(cell):
+					road_cells.append(cell)
+	return road_cells
+
+
+## Places metal guardrails on the outer shoulders of the road (never on the
+## asphalt itself). Sparse enough that campers can still step onto the road.
+static func _place_barriers(
+	tiles: Array, levels: Array, road_cells: Array[Vector2i],
+	width: int, height: int, rng: RandomNumberGenerator
+) -> Array[Vector2i]:
+	var barriers: Array[Vector2i] = []
+	var occupied := {}
+	for cell in road_cells:
+		occupied[cell] = true
+	for cell in road_cells:
+		if rng.randf() >= BARRIER_CHANCE:
+			continue
+		# Outer shoulder only: step away from the paired lane.
+		var side := Vector2i.ZERO
+		if occupied.has(cell + Vector2i(1, 0)) and not occupied.has(cell + Vector2i(-1, 0)):
+			side = Vector2i(-1, 0)
+		elif occupied.has(cell + Vector2i(-1, 0)) and not occupied.has(cell + Vector2i(1, 0)):
+			side = Vector2i(1, 0)
+		elif occupied.has(cell + Vector2i(0, 1)) and not occupied.has(cell + Vector2i(0, -1)):
+			side = Vector2i(0, -1)
+		elif occupied.has(cell + Vector2i(0, -1)) and not occupied.has(cell + Vector2i(0, 1)):
+			side = Vector2i(0, 1)
+		else:
+			continue
+		var n := cell + side
+		if n.x < 0 or n.y < 0 or n.x >= width or n.y >= height:
+			continue
+		if occupied.has(n) or levels[n.y][n.x] != 0:
+			continue
+		var tile: int = tiles[n.y][n.x]
+		if tile != TILE_GRASS and tile != TILE_FOREST and tile != TILE_SAND:
+			continue
+		occupied[n] = true
+		barriers.append(n)
+	return barriers
 
 
 ## Turn some walkable cells into directional ramps, following these rules:
@@ -233,16 +324,19 @@ static func _place_ramps(tiles: Array, levels: Array, width: int, height: int, r
 
 
 # Fixed parcel for debugging rendering: a level-1 plateau with a level-2
-# top, ramps in all four directions at both cliffs, rock and forest tiles.
+# top, ramps in all four directions at both cliffs, rock and forest tiles,
+# plus a two-lane asphalt road (level 0 only) with guardrails.
 # Legend: . deep water, "," water, s sand, g/G/H grass L0/L1/L2,
-# f/F forest L0/L1, r rock L2, > < ^ v ramps rising toward +x/-x/-y/+y.
+# f/F forest L0/L1, r rock L2, =/| asphalt road along X/Y, # barrier,
+# > < ^ v ramps rising toward +x/-x/-y/+y.
 const DEBUG_MAP: Array[String] = [
 	"......................",
 	"......................",
 	",,,,,,,,,,,,,,,,,,,,,,",
 	",ssssssssssssssssssss,",
-	",sggggggggggggggggggs,",
-	",sggggggggvgggggggggs,",
+	",sggg=======ggggggggs,",
+	",sggg=======ggggggggs,",
+	",sgg#gggggvgggg#ggggs,",
 	",sggggGGGGGGGGGGggggs,",
 	",sggggGGGGGGGGGGggggs,",
 	",sggg>GGGGvGGGGGggggs,",
@@ -274,6 +368,9 @@ static func debug_terrain() -> Dictionary:
 		"f": [TILE_FOREST, 0],
 		"F": [TILE_FOREST, 1],
 		"r": [TILE_ROCK, 2],
+		"=": [TILE_ROAD_X, 0],
+		"|": [TILE_ROAD_Y, 0],
+		"#": [TILE_GRASS, 0], # barrier marker; cell stays grass
 		">": [TILE_RAMP_FIRST, -1],
 		"<": [TILE_RAMP_FIRST + 1, -1],
 		"^": [TILE_RAMP_FIRST + 2, -1],
@@ -281,13 +378,18 @@ static func debug_terrain() -> Dictionary:
 	}
 	var tiles: Array = []
 	var levels: Array = []
-	for row_string in DEBUG_MAP:
+	var barriers: Array[Vector2i] = []
+	for y in DEBUG_MAP.size():
+		var row_string := DEBUG_MAP[y]
 		var tile_row := PackedInt32Array()
 		var level_row := PackedInt32Array()
-		for c in row_string:
+		for x in row_string.length():
+			var c := row_string[x]
 			var entry: Array = legend[c]
 			tile_row.append(entry[0])
 			level_row.append(entry[1])
+			if c == "#":
+				barriers.append(Vector2i(x, y))
 		tiles.append(tile_row)
 		levels.append(level_row)
 	# Ramp levels: one below the tile they rise toward.
@@ -300,6 +402,7 @@ static func debug_terrain() -> Dictionary:
 	return {
 		"tiles": tiles,
 		"levels": levels,
+		"barriers": barriers,
 		"weather": WEATHER_CLOUDY,
 		"weather_seed": 1,
 	}

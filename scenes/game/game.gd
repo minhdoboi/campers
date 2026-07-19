@@ -28,6 +28,7 @@ const TREE_TEXTURES: Array[Texture2D] = [
 ]
 const LOG_TEXTURE := preload("res://assets/sprites/log.png")
 const ROCK_TEXTURE := preload("res://assets/sprites/rock.png")
+const BARRIER_TEXTURE := preload("res://assets/sprites/barrier.png")
 const RAMPS_TEXTURE := preload("res://assets/tiles/ramps.png")
 const CAMPER_SCENE := preload("res://scenes/game/camper.tscn")
 const WeatherScript := preload("res://scenes/game/weather.gd")
@@ -86,9 +87,11 @@ var map_h := 0
 var tiles: Array = []
 var levels: Array = []
 var tree_cells := {}
-## Prop sprites (trees, logs, rocks) by cell, hidden until fog of war
-## discovers the cell.
+## Prop sprites (trees, logs, rocks, barriers) by cell, hidden until fog of
+## war discovers the cell.
 var prop_sprites := {}
+## Cells blocked by roadside metal guardrails.
+var barrier_cells := {}
 var walkable_cells: Array[Vector2i] = []
 var campers: Array = []
 ## Ground animals (deer, beavers); a camper close to one gets scared.
@@ -254,6 +257,7 @@ func regenerate() -> void:
 			child.queue_free()
 	tree_cells.clear()
 	prop_sprites.clear()
+	barrier_cells.clear()
 	campers.clear()
 	animals.clear()
 	selected_camper = null
@@ -276,6 +280,8 @@ func regenerate() -> void:
 	levels = data.levels
 	map_h = tiles.size()
 	map_w = tiles[0].size()
+	for cell in data.get("barriers", []):
+		barrier_cells[cell] = true
 	weather.setup(
 		self,
 		data.get("weather", TerrainGenerator.WEATHER_CLEAR),
@@ -306,6 +312,7 @@ func regenerate() -> void:
 
 	_scatter_trees()
 	_scatter_props()
+	_scatter_barriers()
 	_build_navigation()
 	_spawn_campers()
 	_spawn_animals()
@@ -348,8 +355,10 @@ func _build_debug_overlay() -> void:
 func _scatter_trees() -> void:
 	for y in map_h:
 		for x in map_w:
+			var cell := Vector2i(x, y)
+			if barrier_cells.has(cell):
+				continue
 			if tiles[y][x] == TerrainGenerator.TILE_FOREST and rng.randf() < TREE_CHANCE:
-				var cell := Vector2i(x, y)
 				tree_cells[cell] = true
 				var tree := Sprite2D.new()
 				tree.texture = TREE_TEXTURES[rng.randi() % TREE_TEXTURES.size()]
@@ -366,7 +375,7 @@ func _scatter_props() -> void:
 	for y in map_h:
 		for x in map_w:
 			var cell := Vector2i(x, y)
-			if prop_sprites.has(cell):
+			if prop_sprites.has(cell) or barrier_cells.has(cell):
 				continue
 			var tile: int = tiles[y][x]
 			var texture: Texture2D = null
@@ -394,6 +403,18 @@ func _scatter_props() -> void:
 			prop.visible = fog.is_discovered(cell)
 			entities.add_child(prop)
 			prop_sprites[cell] = prop
+
+
+## Metal guardrails beside car roads; they block walking on their cell.
+func _scatter_barriers() -> void:
+	for cell in barrier_cells:
+		var barrier := Sprite2D.new()
+		barrier.texture = BARRIER_TEXTURE
+		barrier.offset = Vector2(0, -8)
+		barrier.position = cell_to_world(cell) + Vector2(rng.randf_range(-4, 4), rng.randf_range(-2, 2))
+		barrier.visible = fog.is_discovered(cell)
+		entities.add_child(barrier)
+		prop_sprites[cell] = barrier
 
 
 func _build_navigation() -> void:
@@ -519,10 +540,13 @@ func _on_cells_revealed(cells: Array[Vector2i]) -> void:
 func is_walkable(cell: Vector2i) -> bool:
 	if cell.x < 0 or cell.y < 0 or cell.x >= map_w or cell.y >= map_h:
 		return false
+	if barrier_cells.has(cell):
+		return false
 	var tile: int = tiles[cell.y][cell.x]
 	return tile == TerrainGenerator.TILE_SAND \
 		or tile == TerrainGenerator.TILE_GRASS \
 		or tile == TerrainGenerator.TILE_FOREST \
+		or TerrainGenerator.is_road(tile) \
 		or TerrainGenerator.is_ramp(tile)
 
 

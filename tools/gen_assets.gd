@@ -23,6 +23,7 @@ func _init() -> void:
 	_make_bird()
 	_make_log()
 	_make_rock()
+	_make_barrier()
 	print("Assets generated.")
 	quit()
 
@@ -36,11 +37,14 @@ func _save(img: Image, path: String) -> void:
 # --- Tile atlas: one row of 64x48 isometric block tiles ------------------
 # Top 32px is the diamond, bottom 16px is a cliff "skirt" shown when the
 # tile sits above a lower elevation level.
-# 0 deep water, 1 water, 2 sand, 3 grass, 4 forest floor, 5 rock
+# 0 deep water, 1 water, 2 sand, 3 grass, 4 forest floor, 5 rock,
+# 6 road along grid X, 7 road along grid Y
 # (ramps live in a separate ramps.png, drawn as sprites over a grass base)
 
 const TILE_TEX_H := 48
 const SKIRT_H := 16
+const TILE_ROAD_X_INDEX := 6
+const TILE_ROAD_Y_INDEX := 7
 
 func _make_tiles() -> void:
 	var bases: Array[Color] = [
@@ -50,6 +54,8 @@ func _make_tiles() -> void:
 		Color("7fb069"), # grass
 		Color("4e7e44"), # forest floor
 		Color("8d8d85"), # rock
+		Color("4a4a4e"), # asphalt road along +x
+		Color("4a4a4e"), # asphalt road along +y
 	]
 	var img := Image.create(TILE_W * bases.size(), TILE_TEX_H, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
@@ -62,8 +68,9 @@ func _make_tiles() -> void:
 
 func _draw_diamond(img: Image, ox: int, base: Color, tile_index: int) -> void:
 	var cx := TILE_W / 2.0
+	var cy := TILE_H / 2.0
 	for y in TILE_H:
-		var dy: float = absf((y + 0.5) - TILE_H / 2.0) / (TILE_H / 2.0)
+		var dy: float = absf((y + 0.5) - cy) / cy
 		var half_w: float = (1.0 - dy) * cx
 		var x_start := int(ceil(cx - half_w))
 		var x_end := int(floor(cx + half_w))
@@ -80,11 +87,35 @@ func _draw_diamond(img: Image, ox: int, base: Color, tile_index: int) -> void:
 			# Gentle wave stripes on the water tiles.
 			if tile_index <= 1 and (y + tile_index * 2) % 6 == 0 and rng.randf() < 0.6:
 				c = c.lightened(0.10)
+			# Asphalt: dashed line follows the isometric travel axis.
+			if tile_index == TILE_ROAD_X_INDEX or tile_index == TILE_ROAD_Y_INDEX:
+				c = _road_pixel(c, float(x) - cx, float(y) - cy, tile_index == TILE_ROAD_X_INDEX, r)
 			# Darken the diamond rim so tiles read individually.
 			var on_edge: bool = x <= x_start or x >= x_end - 1 or y == 0 or y == TILE_H - 1
 			if on_edge:
 				c = c.darkened(0.18)
 			img.set_pixel(ox + x, y, c)
+
+
+## Road markings in diamond space. Grid +x travels along the SE iso diagonal
+## (dx ≈ 2·dy); grid +y along the SW diagonal (dx ≈ -2·dy).
+func _road_pixel(base: Color, dx: float, dy: float, along_x: bool, noise: float) -> Color:
+	var across: float
+	var along: float
+	if along_x:
+		across = absf(dx - 2.0 * dy)
+		along = dx + 2.0 * dy
+	else:
+		across = absf(dx + 2.0 * dy)
+		along = -dx + 2.0 * dy
+	var c := base
+	if across < 1.8 and posmod(int(along + 40.0), 10) < 5:
+		c = Color("e8d66a") # dashed yellow center line
+	elif across > 14.0:
+		c = c.lightened(0.14) # pale shoulder edge
+	elif noise < 0.08:
+		c = c.darkened(0.12)
+	return c
 
 
 func _draw_skirt(img: Image, ox: int) -> void:
@@ -462,6 +493,28 @@ func _make_rock() -> void:
 	for i in 4:
 		img.set_pixel(6 + i, 4 + i, stone.darkened(0.3))
 	_save(img, "res://assets/sprites/rock.png")
+
+
+# Metal roadside guardrail (silver rails on dark posts).
+func _make_barrier() -> void:
+	var img := Image.create(22, 16, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var post := Color("3a3a3e")
+	var rail := Color("b8bcc2")
+	# Three posts.
+	for post_x in [2, 10, 18]:
+		for y in range(5, 15):
+			img.set_pixel(post_x, y, post)
+			img.set_pixel(post_x + 1, y, post.lightened(0.12))
+	# W-beam style double rail.
+	for x in range(1, 21):
+		img.set_pixel(x, 5, rail.lightened(0.1))
+		img.set_pixel(x, 6, rail)
+		img.set_pixel(x, 7, rail.darkened(0.15))
+		img.set_pixel(x, 9, rail.lightened(0.05))
+		img.set_pixel(x, 10, rail.darkened(0.08))
+		img.set_pixel(x, 11, rail.darkened(0.22))
+	_save(img, "res://assets/sprites/barrier.png")
 
 
 # --- Character portraits: 32bit retro-RPG busts, one per named camper -----
