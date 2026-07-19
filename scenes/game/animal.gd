@@ -23,6 +23,9 @@ const BIRD_FLAP_PERIOD := 0.22
 var game: Node2D
 var species: Species = Species.DEER
 var cell: Vector2i
+## When true, inspecting near this animal yields a "wounded animal" card.
+var has_wounded_card := false
+var wounded_card_collected := false
 
 var _path: Array = []
 var _idle := 0.0
@@ -48,6 +51,20 @@ func setup(game_node: Node2D, start_cell: Vector2i, animal_species: Species) -> 
 			hframes = 2
 			position = game.cell_to_world(cell) + Vector2(0, -BIRD_FLY_HEIGHT)
 			_pick_fly_target()
+
+
+## Marks this animal as carrying a hidden wounded-animal evidence card.
+func mark_wounded() -> void:
+	if species == Species.BIRD:
+		return
+	has_wounded_card = true
+	wounded_card_collected = false
+
+
+## Called when a camper collects this animal's wounded card.
+func reveal_wound() -> void:
+	wounded_card_collected = true
+	modulate = Color(1.0, 0.72, 0.68)
 
 
 func _process(delta: float) -> void:

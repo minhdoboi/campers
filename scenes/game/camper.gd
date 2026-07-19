@@ -274,10 +274,23 @@ func _start_current() -> void:
 
 
 func _finish_current() -> void:
+	var finished: Dictionary = actions[0]
 	actions.pop_front()
 	_current_started = false
+	if finished.type == "task" and str(finished.label).begins_with("Inspect"):
+		_collect_nearby_cards()
 	_recompute_plan_cell()
 	actions_changed.emit()
+
+
+## Inspect ground/trees: pick up any hidden evidence cards on this cell or
+## an adjacent one into the team's card collection.
+func _collect_nearby_cards() -> void:
+	var cards: Array[Dictionary] = game.try_discover_nearby(cell)
+	if cards.is_empty():
+		return
+	morale = clampf(morale + 6.0 * float(cards.size()), 0.0, 100.0)
+	emotion = _derive_emotion()
 
 
 func _walk_action(from: Vector2i, target: Vector2i) -> Dictionary:

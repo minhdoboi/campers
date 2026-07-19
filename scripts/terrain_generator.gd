@@ -24,6 +24,9 @@ const MAX_LEVEL := 2
 const RAMP_CHANCE := 0.75
 ## Chance a roadside shoulder gets a metal guardrail (blocks that cell only).
 const BARRIER_CHANCE := 0.12
+## How many hidden roadside evidence cards to scatter (dead bird / beaver).
+const ROADSIDE_FIND_MIN := 2
+const ROADSIDE_FIND_MAX := 4
 
 ## Parcel sky conditions rolled during generation. Cloudy and rainy both get
 ## drifting cloud shadows; rainy also spawns rain particles.
@@ -110,11 +113,14 @@ static func generate(width: int, height: int, seed_value: int) -> Dictionary:
 	_smooth_levels(levels, width, height)
 	_place_ramps(tiles, levels, width, height, rng)
 	var barriers := _place_barriers(tiles, levels, road_cells, width, height, rng)
+	var discoverables := _place_roadside_finds(
+		tiles, levels, road_cells, barriers, width, height, rng)
 	var avg_moisture := moisture_sum / float(moisture_count)
 	return {
 		"tiles": tiles,
 		"levels": levels,
 		"barriers": barriers,
+		"discoverables": discoverables,
 		"weather": _roll_weather(rng, avg_moisture),
 		"weather_seed": seed_value + 3000,
 	}
@@ -270,6 +276,47 @@ static func _place_barriers(
 	return barriers
 
 
+## Hidden evidence on road shoulders (dead bird / beaver). Invisible until a
+## camper inspects the cell or an adjacent one.
+static func _place_roadside_finds(
+	tiles: Array, levels: Array, road_cells: Array[Vector2i],
+	barriers: Array[Vector2i], width: int, height: int, rng: RandomNumberGenerator
+) -> Array:
+	var occupied := {}
+	for cell in road_cells:
+		occupied[cell] = true
+	for cell in barriers:
+		occupied[cell] = true
+	var shoulders: Array[Vector2i] = []
+	for cell in road_cells:
+		for side in DIRS:
+			var n := cell + side
+			if n.x < 0 or n.y < 0 or n.x >= width or n.y >= height:
+				continue
+			if occupied.has(n) or levels[n.y][n.x] != 0:
+				continue
+			var tile: int = tiles[n.y][n.x]
+			if tile != TILE_GRASS and tile != TILE_FOREST and tile != TILE_SAND:
+				continue
+			if not shoulders.has(n):
+				shoulders.append(n)
+	# Shuffle by Fisher–Yates.
+	for i in range(shoulders.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := shoulders[i]
+		shoulders[i] = shoulders[j]
+		shoulders[j] = tmp
+	var kinds: Array[String] = [
+		DiscoverableCards.KIND_DEAD_BIRD,
+		DiscoverableCards.KIND_DEAD_BEAVER,
+	]
+	var count := mini(rng.randi_range(ROADSIDE_FIND_MIN, ROADSIDE_FIND_MAX), shoulders.size())
+	var finds: Array = []
+	for i in count:
+		finds.append({"cell": shoulders[i], "kind": kinds[rng.randi() % kinds.size()]})
+	return finds
+
+
 ## Turn some walkable cells into directional ramps, following these rules:
 ## - a ramp never touches another ramp (8-neighborhood);
 ## - along the ramp's axis, the tile it rises toward is exactly one level
@@ -399,10 +446,18 @@ static func debug_terrain() -> Dictionary:
 				var d := ramp_dir(tiles[y][x])
 				levels[y][x] = int(levels[y + d.y][x + d.x]) - 1
 	# Fixed cloudy sky so cloud shadows are visible while debugging layout.
+	# Roadside finds near the asphalt strip for inspect testing.
+	var discoverables: Array = [
+		{"cell": Vector2i(6, 6), "kind": DiscoverableCards.KIND_DEAD_BIRD},
+		{"cell": Vector2i(13, 6), "kind": DiscoverableCards.KIND_DEAD_BEAVER},
+		{"cell": Vector2i(3, 17), "kind": DiscoverableCards.KIND_FORBIDDEN_CUT},
+		{"cell": Vector2i(5, 6), "kind": DiscoverableCards.KIND_ANIMAL_TRAP},
+	]
 	return {
 		"tiles": tiles,
 		"levels": levels,
 		"barriers": barriers,
+		"discoverables": discoverables,
 		"weather": WEATHER_CLOUDY,
 		"weather_seed": 1,
 	}

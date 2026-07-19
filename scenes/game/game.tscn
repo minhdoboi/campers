@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://scenes/game/game.gd" id="1_game"]
 [ext_resource type="Script" path="res://scenes/game/fog_of_war.gd" id="6_fog"]
@@ -7,6 +7,7 @@
 [ext_resource type="Script" path="res://scenes/game/hud.gd" id="4_hud"]
 [ext_resource type="Script" path="res://scenes/game/inventory_popup.gd" id="5_inventory"]
 [ext_resource type="Script" path="res://scenes/game/weather.gd" id="7_weather"]
+[ext_resource type="Script" path="res://scenes/game/cards_tray.gd" id="8_cards"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_hint"]
 content_margin_left = 12.0
@@ -218,3 +219,91 @@ text = "✕"
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 6
+
+[node name="CardsTray" type="Control" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -88.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = 72.0
+grow_horizontal = 0
+script = ExtResource("8_cards")
+
+[node name="CardBadge" type="Button" parent="UI/CardsTray"]
+unique_name_in_owner = true
+layout_mode = 0
+offset_right = 72.0
+offset_bottom = 48.0
+focus_mode = 0
+theme_override_styles/normal = SubResource("StyleBoxFlat_hud")
+theme_override_styles/hover = SubResource("StyleBoxFlat_hud")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_hud")
+
+[node name="BadgeRow" type="HBoxContainer" parent="UI/CardsTray/CardBadge"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 6
+alignment = 1
+
+[node name="CardIcon" type="Label" parent="UI/CardsTray/CardBadge/BadgeRow"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "🃏"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="CardCount" type="Label" parent="UI/CardsTray/CardBadge/BadgeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "0"
+vertical_alignment = 1
+
+[node name="CardsPopup" type="PanelContainer" parent="UI/CardsTray"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 0
+offset_left = -220.0
+offset_top = 56.0
+offset_right = 72.0
+offset_bottom = 320.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_hud")
+
+[node name="Layout" type="VBoxContainer" parent="UI/CardsTray/CardsPopup"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="TopRow" type="HBoxContainer" parent="UI/CardsTray/CardsPopup/Layout"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="CardsTitle" type="Label" parent="UI/CardsTray/CardsPopup/Layout/TopRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 16
+text = "Cards"
+
+[node name="CardsCloseButton" type="Button" parent="UI/CardsTray/CardsPopup/Layout/TopRow"]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+flat = true
+text = "✕"
+
+[node name="Scroll" type="ScrollContainer" parent="UI/CardsTray/CardsPopup/Layout"]
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 200)
+
+[node name="CardList" type="VBoxContainer" parent="UI/CardsTray/CardsPopup/Layout/Scroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 10

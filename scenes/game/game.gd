@@ -29,9 +29,21 @@ const TREE_TEXTURES: Array[Texture2D] = [
 const LOG_TEXTURE := preload("res://assets/sprites/log.png")
 const ROCK_TEXTURE := preload("res://assets/sprites/rock.png")
 const BARRIER_TEXTURE := preload("res://assets/sprites/barrier.png")
+const BIRD_TEXTURE := preload("res://assets/sprites/bird.png")
+const BEAVER_TEXTURE := preload("res://assets/sprites/beaver.png")
+const TRAP_TEXTURE := preload("res://assets/sprites/trap.png")
 const RAMPS_TEXTURE := preload("res://assets/tiles/ramps.png")
 const CAMPER_SCENE := preload("res://scenes/game/camper.tscn")
 const WeatherScript := preload("res://scenes/game/weather.gd")
+## Chance a scattered log hides a "forbidden cut" evidence card.
+const FORBIDDEN_CUT_CHANCE := 0.28
+## How many animal traps to hide near barriers / trees.
+const TRAP_FIND_MIN := 2
+const TRAP_FIND_MAX := 4
+## Chance a ground animal carries a hidden "wounded animal" card.
+const WOUNDED_ANIMAL_CHANCE := 0.4
+## Chebyshev radius: inspect finds cards on the camper's cell and neighbours.
+const INSPECT_FIND_RADIUS := 1
 
 const DEER_COUNT := 7
 const BEAVER_COUNT := 4
@@ -81,6 +93,7 @@ const CHARACTERS := [
 @onready var selected_morale_bar: ProgressBar = %SelectedMoraleBar
 @onready var inventory_button: Button = %InventoryButton
 @onready var inventory_popup: PanelContainer = $UI/InventoryPopup
+@onready var cards_tray: Control = $UI/CardsTray
 
 var map_w := 0
 var map_h := 0
@@ -92,6 +105,10 @@ var tree_cells := {}
 var prop_sprites := {}
 ## Cells blocked by roadside metal guardrails.
 var barrier_cells := {}
+## Hidden evidence: cell -> {kind, collected, sprite}.
+var hidden_finds := {}
+## Team-wide evidence cards found by any camper this parcel.
+var collected_cards: Array[Dictionary] = []
 var walkable_cells: Array[Vector2i] = []
 var campers: Array = []
 ## Ground animals (deer, beavers); a camper close to one gets scared.
@@ -258,10 +275,14 @@ func regenerate() -> void:
 	tree_cells.clear()
 	prop_sprites.clear()
 	barrier_cells.clear()
+	hidden_finds.clear()
+	collected_cards.clear()
 	campers.clear()
 	animals.clear()
 	selected_camper = null
 	inventory_popup.hide()
+	cards_tray.refresh(collected_cards)
+	cards_tray.popup.hide()
 	for child in entities.get_children():
 		child.queue_free()
 	for child in birds.get_children():
@@ -282,6 +303,10 @@ func regenerate() -> void:
 	map_w = tiles[0].size()
 	for cell in data.get("barriers", []):
 		barrier_cells[cell] = true
+	## Cells reserved for generator-placed finds (skip random trees/rocks).
+	var reserved_finds := {}
+	for find in data.get("discoverables", []):
+		reserved_finds[find.cell] = find.kind
 	weather.setup(
 		self,
 		data.get("weather", TerrainGenerator.WEATHER_CLEAR),
@@ -310,9 +335,12 @@ func regenerate() -> void:
 			else:
 				layers[levels[y][x]].set_cell(cell, 0, Vector2i(tile, 0))
 
-	_scatter_trees()
-	_scatter_props()
+	_scatter_trees(reserved_finds)
+	_scatter_props(reserved_finds)
 	_scatter_barriers()
+	for find in data.get("discoverables", []):
+		_register_hidden_find(find.cell, find.kind)
+	_scatter_trap_finds()
 	_build_navigation()
 	_spawn_campers()
 	_spawn_animals()
@@ -352,11 +380,11 @@ func _build_debug_overlay() -> void:
 			debug_overlay.add_child(dot)
 
 
-func _scatter_trees() -> void:
+func _scatter_trees(reserved_finds: Dictionary = {}) -> void:
 	for y in map_h:
 		for x in map_w:
 			var cell := Vector2i(x, y)
-			if barrier_cells.has(cell):
+			if barrier_cells.has(cell) or reserved_finds.has(cell):
 				continue
 			if tiles[y][x] == TerrainGenerator.TILE_FOREST and rng.randf() < TREE_CHANCE:
 				tree_cells[cell] = true
@@ -371,23 +399,39 @@ func _scatter_trees() -> void:
 
 
 ## Sprinkles fallen logs and boulders over cells that have no tree yet.
-func _scatter_props() -> void:
+## Some logs hide a "forbidden cut" card until inspected.
+func _scatter_props(reserved_finds: Dictionary = {}) -> void:
 	for y in map_h:
 		for x in map_w:
 			var cell := Vector2i(x, y)
 			if prop_sprites.has(cell) or barrier_cells.has(cell):
 				continue
+			# Leave generator roadside carcass cells empty; seed a log when the
+			# reserved find is a forbidden cut.
+			if reserved_finds.has(cell):
+				if reserved_finds[cell] == DiscoverableCards.KIND_FORBIDDEN_CUT:
+					var log := Sprite2D.new()
+					log.texture = LOG_TEXTURE
+					log.offset = Vector2(0, -4)
+					log.position = cell_to_world(cell)
+					log.visible = fog.is_discovered(cell)
+					entities.add_child(log)
+					prop_sprites[cell] = log
+				continue
 			var tile: int = tiles[y][x]
 			var texture: Texture2D = null
+			var is_log := false
 			match tile:
 				TerrainGenerator.TILE_GRASS:
 					if rng.randf() < 0.015:
 						texture = ROCK_TEXTURE
 					elif rng.randf() < 0.012:
 						texture = LOG_TEXTURE
+						is_log = true
 				TerrainGenerator.TILE_FOREST:
 					if rng.randf() < 0.03:
 						texture = LOG_TEXTURE
+						is_log = true
 				TerrainGenerator.TILE_SAND:
 					if rng.randf() < 0.03:
 						texture = ROCK_TEXTURE
@@ -403,6 +447,8 @@ func _scatter_props() -> void:
 			prop.visible = fog.is_discovered(cell)
 			entities.add_child(prop)
 			prop_sprites[cell] = prop
+			if is_log and rng.randf() < FORBIDDEN_CUT_CHANCE:
+				_register_hidden_find(cell, DiscoverableCards.KIND_FORBIDDEN_CUT)
 
 
 ## Metal guardrails beside car roads; they block walking on their cell.
@@ -415,6 +461,162 @@ func _scatter_barriers() -> void:
 		barrier.visible = fog.is_discovered(cell)
 		entities.add_child(barrier)
 		prop_sprites[cell] = barrier
+
+
+## Animal traps hidden on walkable ground next to barriers or trees.
+func _scatter_trap_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	var dirs: Array[Vector2i] = [
+		Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+	]
+	for cell: Vector2i in barrier_cells:
+		for d in dirs:
+			var n: Vector2i = cell + d
+			if _can_host_find(n) and not candidates.has(n):
+				candidates.append(n)
+	for cell: Vector2i in tree_cells:
+		for d in dirs:
+			var n: Vector2i = cell + d
+			if _can_host_find(n) and not candidates.has(n):
+				candidates.append(n)
+		if _can_host_find(cell) and not candidates.has(cell):
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(rng.randi_range(TRAP_FIND_MIN, TRAP_FIND_MAX), candidates.size())
+	for i in count:
+		_register_hidden_find(candidates[i], DiscoverableCards.KIND_ANIMAL_TRAP)
+
+
+func _can_host_find(cell: Vector2i) -> bool:
+	if cell.x < 0 or cell.y < 0 or cell.x >= map_w or cell.y >= map_h:
+		return false
+	if barrier_cells.has(cell) or hidden_finds.has(cell):
+		return false
+	var tile: int = tiles[cell.y][cell.x]
+	return tile == TerrainGenerator.TILE_GRASS \
+		or tile == TerrainGenerator.TILE_FOREST \
+		or tile == TerrainGenerator.TILE_SAND \
+		or TerrainGenerator.is_road(tile)
+
+
+## Registers a hidden evidence card on a cell. Carcasses/traps stay invisible
+## until inspected; forbidden-cut uses the log already on the cell.
+func _register_hidden_find(cell: Vector2i, kind: String) -> void:
+	if cell.x < 0 or cell.y < 0 or cell.x >= map_w or cell.y >= map_h:
+		return
+	if hidden_finds.has(cell) or barrier_cells.has(cell):
+		return
+	var detail := DiscoverableCards.pick_detail(kind, rng)
+	var sprite: Sprite2D = null
+	match kind:
+		DiscoverableCards.KIND_DEAD_BIRD:
+			sprite = _make_find_sprite(cell, BIRD_TEXTURE, Vector2(0, -2), Color(0.55, 0.5, 0.5))
+			sprite.hframes = 2
+			sprite.frame = 1
+			sprite.rotation_degrees = 90.0
+			sprite.scale = Vector2(1.1, 1.1)
+		DiscoverableCards.KIND_DEAD_BEAVER:
+			sprite = _make_find_sprite(cell, BEAVER_TEXTURE, Vector2(0, -2), Color(0.5, 0.45, 0.45))
+			sprite.rotation_degrees = 75.0
+		DiscoverableCards.KIND_ANIMAL_TRAP:
+			sprite = _make_find_sprite(cell, TRAP_TEXTURE, Vector2(0, -2), Color.WHITE)
+		DiscoverableCards.KIND_FORBIDDEN_CUT:
+			if prop_sprites.has(cell):
+				sprite = prop_sprites[cell]
+			else:
+				sprite = _make_find_sprite(cell, LOG_TEXTURE, Vector2(0, -4), Color.WHITE)
+				sprite.visible = fog.is_discovered(cell)
+				prop_sprites[cell] = sprite
+			# Log stays fog-gated; the card itself is still hidden until inspect.
+			hidden_finds[cell] = {
+				"kind": kind, "collected": false, "sprite": sprite, "detail": detail,
+			}
+			return
+		_:
+			return
+	sprite.visible = false
+	hidden_finds[cell] = {
+		"kind": kind, "collected": false, "sprite": sprite, "detail": detail,
+	}
+
+
+func _make_find_sprite(cell: Vector2i, texture: Texture2D, offset: Vector2, modulate: Color) -> Sprite2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = texture
+	sprite.offset = offset
+	sprite.modulate = modulate
+	sprite.position = cell_to_world(cell) + Vector2(rng.randf_range(-4, 4), rng.randf_range(-2, 2))
+	entities.add_child(sprite)
+	return sprite
+
+
+## Called when a camper finishes inspecting: reveals and returns any cards on
+## or next to `center` that have not been collected yet — including wounded
+## animals standing nearby.
+func try_discover_nearby(center: Vector2i) -> Array[Dictionary]:
+	var cards: Array[Dictionary] = []
+	for y in range(center.y - INSPECT_FIND_RADIUS, center.y + INSPECT_FIND_RADIUS + 1):
+		for x in range(center.x - INSPECT_FIND_RADIUS, center.x + INSPECT_FIND_RADIUS + 1):
+			var cell := Vector2i(x, y)
+			if not hidden_finds.has(cell):
+				continue
+			var find: Dictionary = hidden_finds[cell]
+			if find.collected:
+				continue
+			find.collected = true
+			var sprite: Sprite2D = find.sprite
+			if is_instance_valid(sprite):
+				sprite.visible = true
+				if find.kind == DiscoverableCards.KIND_FORBIDDEN_CUT:
+					sprite.modulate = Color(1.0, 0.75, 0.55)
+			var item := DiscoverableCards.make_item(find.kind, find.get("detail", ""))
+			cards.append(item)
+			_show_find_toast(cell_to_world(cell), DiscoverableCards.localize(item).name)
+	for animal in animals:
+		if not is_instance_valid(animal) or not animal.has_wounded_card \
+				or animal.wounded_card_collected:
+			continue
+		var offset: Vector2i = animal.cell - center
+		if maxi(absi(offset.x), absi(offset.y)) > INSPECT_FIND_RADIUS:
+			continue
+		animal.reveal_wound()
+		var detail := DiscoverableCards.pick_detail(DiscoverableCards.KIND_WOUNDED_ANIMAL, rng)
+		var item := DiscoverableCards.make_item(DiscoverableCards.KIND_WOUNDED_ANIMAL, detail)
+		cards.append(item)
+		_show_find_toast(animal.position, DiscoverableCards.localize(item).name)
+	if not cards.is_empty():
+		collect_cards(cards)
+	return cards
+
+
+## Adds evidence cards to the team collection and refreshes the corner badge.
+func collect_cards(cards: Array[Dictionary]) -> void:
+	for card in cards:
+		collected_cards.append(card)
+	cards_tray.refresh(collected_cards)
+
+
+## Brief floating label over a newly revealed find.
+func _show_find_toast(world_pos: Vector2, text: String) -> void:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", 11)
+	label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.55, 1.0))
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	label.add_theme_constant_override("outline_size", 3)
+	label.position = world_pos - Vector2(48, 28)
+	label.z_index = 20
+	entities.add_child(label)
+	var tween := create_tween()
+	tween.tween_property(label, "position:y", label.position.y - 18.0, 1.4) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	tween.parallel().tween_property(label, "modulate:a", 0.0, 1.4) \
+		.set_delay(0.4)
+	tween.tween_callback(label.queue_free)
 
 
 func _build_navigation() -> void:
@@ -492,6 +694,8 @@ func _spawn_animal(cell: Vector2i, species: Animal.Species, parent: Node2D) -> v
 	animal.setup(self, cell, species)
 	if species != Animal.Species.BIRD:
 		animals.append(animal)
+		if rng.randf() < WOUNDED_ANIMAL_CHANCE:
+			animal.mark_wounded()
 
 
 ## Picks `count` distinct characters at random from the full roster.

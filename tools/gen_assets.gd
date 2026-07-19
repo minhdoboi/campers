@@ -24,6 +24,7 @@ func _init() -> void:
 	_make_log()
 	_make_rock()
 	_make_barrier()
+	_make_trap()
 	print("Assets generated.")
 	quit()
 
@@ -493,6 +494,28 @@ func _make_rock() -> void:
 	for i in 4:
 		img.set_pixel(6 + i, 4 + i, stone.darkened(0.3))
 	_save(img, "res://assets/sprites/rock.png")
+
+
+# Small wire snare / animal trap for hidden evidence finds.
+func _make_trap() -> void:
+	var img := Image.create(14, 12, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var wire := Color("8a8e94")
+	var stake := Color("5a4030")
+	# Stake.
+	for y in range(4, 12):
+		img.set_pixel(6, y, stake)
+		img.set_pixel(7, y, stake.lightened(0.1))
+	# Snare loop.
+	for a in 16:
+		var ang := TAU * float(a) / 16.0
+		var x := int(7.0 + cos(ang) * 4.0)
+		var y := int(4.0 + sin(ang) * 3.0)
+		if x >= 0 and x < 14 and y >= 0 and y < 12:
+			img.set_pixel(x, y, wire)
+	img.set_pixel(10, 4, wire.lightened(0.15))
+	img.set_pixel(11, 5, wire)
+	_save(img, "res://assets/sprites/trap.png")
 
 
 # Metal roadside guardrail (silver rails on dark posts).
