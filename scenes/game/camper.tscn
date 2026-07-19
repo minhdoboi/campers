@@ -1,0 +1,9 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Texture2D" path="res://assets/sprites/camper.png" id="1_camper"]
+[ext_resource type="Script" path="res://scenes/game/camper.gd" id="2_camper"]
+
+[node name="Camper" type="Sprite2D"]
+texture = ExtResource("1_camper")
+offset = Vector2(0, -11)
+script = ExtResource("2_camper")
