@@ -142,11 +142,13 @@ func _make_mode_button(index: int) -> MenuButton:
 	var menu := MenuButton.new()
 	menu.flat = false
 	menu.focus_mode = Control.FOCUS_NONE
-	menu.custom_minimum_size = Vector2(120, 0)
-	menu.text = Camper.MODE_NAMES[campers[index].mode]
+	menu.custom_minimum_size = Vector2(130, 0)
+	menu.text = tr(Camper.MODE_NAMES[campers[index].mode])
 	var popup := menu.get_popup()
 	popup.add_separator(tr("Mode"))
 	for m: int in Camper.MODE_NAMES:
+		if m == Camper.Mode.AUTONOMOUS:
+			continue # entered automatically when morale is low
 		popup.add_radio_check_item(tr(Camper.MODE_NAMES[m]), MODE_ID_BASE + m)
 	popup.add_separator(tr("Add action"))
 	for i in Camper.TASKS.size():
@@ -185,7 +187,7 @@ func _on_person_gui_input(event: InputEvent, index: int) -> void:
 func _on_camper_actions_changed(index: int) -> void:
 	var camper := _camper_at(index)
 	if camper != null and index < _mode_buttons.size():
-		_mode_buttons[index].text = Camper.MODE_NAMES[camper.mode]
+		_mode_buttons[index].text = tr(Camper.MODE_NAMES[camper.mode])
 	_refresh_row(index)
 
 
@@ -196,6 +198,8 @@ func _on_menu_about_to_popup(index: int) -> void:
 	var camper := _camper_at(index)
 	var popup := _mode_buttons[index].get_popup()
 	for m: int in Camper.MODE_NAMES:
+		if m == Camper.Mode.AUTONOMOUS:
+			continue
 		var idx := popup.get_item_index(MODE_ID_BASE + m)
 		popup.set_item_checked(idx, camper != null and camper.mode == m)
 
@@ -209,7 +213,7 @@ func _on_menu_id_pressed(id: int, index: int) -> void:
 		camper.add_task(task[0], task[1], task[2])
 	elif id >= MODE_ID_BASE:
 		camper.set_mode((id - MODE_ID_BASE) as Camper.Mode)
-		_mode_buttons[index].text = Camper.MODE_NAMES[camper.mode]
+		_mode_buttons[index].text = tr(Camper.MODE_NAMES[camper.mode])
 
 
 func _select(index: int) -> void:
@@ -235,8 +239,8 @@ func _refresh_row(index: int) -> void:
 	var selected := index == selected_index
 	if camper.actions.is_empty():
 		var hint := Label.new()
-		hint.text = "No actions — shift+click the map to add a waypoint" if selected \
-				else "No actions"
+		hint.text = tr("No actions — click the map to move") if selected \
+				else tr("No actions")
 		hint.add_theme_color_override("font_color",
 				Color(0.85, 0.9, 0.82, 0.5 if selected else 0.25))
 		box.add_child(hint)

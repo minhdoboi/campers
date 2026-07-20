@@ -8,6 +8,10 @@ const TREE_CHANCE := 0.55
 const LEVEL_PIXEL_OFFSET := 16
 ## Max distance (world px) from a click to a camper for it to count as a hit.
 const CAMPER_SELECT_RADIUS := 20.0
+## World-space offset of the selection arrow tip above a camper's feet.
+const SELECTION_ARROW_OFFSET := Vector2(0, -32)
+## Max distance (world px) from the cursor to a cliff edge to show/click its arrow.
+const EDGE_ACTION_HIT_RADIUS := 16.0
 ## Fog of war: cells within this distance of a camper become discovered.
 const REVEAL_RADIUS := 6
 # Ramps are y-sorted inside the terrain layer they rise to, so the upper
@@ -37,9 +41,28 @@ const CAMPER_SCENE := preload("res://scenes/game/camper.tscn")
 const WeatherScript := preload("res://scenes/game/weather.gd")
 ## Chance a scattered log hides a "forbidden cut" evidence card.
 const FORBIDDEN_CUT_CHANCE := 0.28
+## Chance each neighbour of a log gets a bird-nest remnant (ornithologist only).
+const NEST_AROUND_LOG_CHANCE := 0.22
 ## How many animal traps to hide near barriers / trees.
 const TRAP_FIND_MIN := 2
 const TRAP_FIND_MAX := 4
+## Discarded fishing line on banks / walkable cells next to water.
+const FISHING_LINE_FIND_MIN := 1
+const FISHING_LINE_FIND_MAX := 3
+## Leftover food scraps on open grass / forest.
+const LEFTOVER_FOOD_FIND_MIN := 1
+const LEFTOVER_FOOD_FIND_MAX := 3
+## How many visible berry patches to scatter for foraging.
+const BERRY_FIND_MIN := 10
+const BERRY_FIND_MAX := 18
+## How many botanist plant finds to hide on grass / forest.
+const PLANT_FIND_MIN := 8
+const PLANT_FIND_MAX := 14
+## How many ornithologist bird sightings to hide on tree cells.
+const BIRD_TREE_FIND_MIN := 6
+const BIRD_TREE_FIND_MAX := 12
+## World-px radius: ornithologist can ID a flying bird that passes this close.
+const BIRD_SIGHTING_RADIUS := 90.0
 ## Chance a ground animal carries a hidden "wounded animal" card.
 const WOUNDED_ANIMAL_CHANCE := 0.4
 ## Chebyshev radius: inspect finds cards on the camper's cell and neighbours.
@@ -79,6 +102,7 @@ const CHARACTERS := [
 @onready var birds: Node2D = $Birds
 @onready var weather: WeatherScript = $Weather
 @onready var waypoint_markers: Node2D = $WaypointMarkers
+@onready var edge_action_markers: Node2D = $EdgeActionMarkers
 @onready var debug_overlay: Node2D = $DebugOverlay
 @onready var fog: FogOfWar = $Fog
 @onready var camera: Camera2D = $Camera
@@ -94,6 +118,7 @@ const CHARACTERS := [
 @onready var inventory_button: Button = %InventoryButton
 @onready var inventory_popup: PanelContainer = $UI/InventoryPopup
 @onready var cards_tray: Control = $UI/CardsTray
+@onready var journal_log: Control = $UI/JournalLog
 
 var map_w := 0
 var map_h := 0
@@ -109,6 +134,8 @@ var barrier_cells := {}
 var hidden_finds := {}
 ## Team-wide evidence cards found by any camper this parcel.
 var collected_cards: Array[Dictionary] = []
+## Append-only journal of notable events (berry finds, etc.) with map cells.
+var journal_entries: Array[Dictionary] = []
 var walkable_cells: Array[Vector2i] = []
 var campers: Array = []
 ## Ground animals (deer, beavers); a camper close to one gets scared.
@@ -116,7 +143,25 @@ var animals: Array = []
 var astar := AStar2D.new()
 var rng := RandomNumberGenerator.new()
 var ramp_textures: Array[AtlasTexture] = []
+## Cached procedural texture for berry patch markers.
+var _berry_texture: Texture2D = null
 var selected_camper: Node2D = null
+## White ▼ outline that tracks the selected camper (not a child, so it stays untinted).
+var _selection_arrow: Line2D
+## Extra Y offset during the selection-change bump animation.
+var _selection_arrow_bump := 0.0
+var _selection_arrow_tween: Tween
+## Brief diamond flash when a journal entry with a map cell is clicked.
+var _tile_highlight: Node2D
+var _tile_highlight_tween: Tween
+## Hit targets for cliff climb/descend arrows: {pos, target, cost, going_up}.
+var _edge_action_hits: Array[Dictionary] = []
+## Last plan cell used to rebuild edge hits (refresh when it changes).
+var _edge_actions_plan_cell := Vector2i(-999, -999)
+## Whole-number energy when edge hits were last rebuilt (affordability).
+var _edge_actions_energy_key := -1
+## Index into _edge_action_hits of the hovered edge, or -1 when none.
+var _hovered_edge_index := -1
 ## While paused, campers freeze but selection, waypoints, and the HUD stay
 ## interactive, so plans can be edited calmly.
 var paused := false
@@ -129,11 +174,25 @@ func _ready() -> void:
 		tex.atlas = RAMPS_TEXTURE
 		tex.region = Rect2(d * 64, 0, 64, 64)
 		ramp_textures.append(tex)
+	_selection_arrow = Line2D.new()
+	_selection_arrow.points = PackedVector2Array([
+		Vector2(-3, -1.5), Vector2(0, 2.5), Vector2(3, -1.5),
+	])
+	_selection_arrow.width = 1.0
+	_selection_arrow.default_color = Color(1, 1, 1, 0.95)
+	_selection_arrow.joint_mode = Line2D.LINE_JOINT_SHARP
+	_selection_arrow.begin_cap_mode = Line2D.LINE_CAP_NONE
+	_selection_arrow.end_cap_mode = Line2D.LINE_CAP_NONE
+	_selection_arrow.visible = false
+	_selection_arrow.z_index = 20
+	add_child(_selection_arrow)
 	_style_stat_bar(selected_energy_bar, Color(0.35, 0.62, 1.0), tr("Energy"))
 	_style_stat_bar(selected_morale_bar, Color(0.92, 0.3, 0.3), tr("Morale"))
 	hud.focus_requested.connect(_on_focus_requested)
 	hud.selection_changed.connect(_on_camper_selected)
 	inventory_button.pressed.connect(_on_inventory_button_pressed)
+	journal_log.focus_requested.connect(_on_journal_focus_requested)
+	journal_log.solve_requested.connect(_on_journal_solve_requested)
 	fog.cells_revealed.connect(_on_cells_revealed)
 	camera.clicked.connect(_on_world_clicked)
 	camera.shift_clicked.connect(_on_world_shift_clicked)
@@ -156,6 +215,19 @@ func _style_stat_bar(bar: ProgressBar, fill_color: Color, tip: String) -> void:
 ## The selected camper's stats and emotion change continuously without a
 ## signal, so the portrait panel is polled every frame.
 func _process(_delta: float) -> void:
+	if is_instance_valid(selected_camper):
+		_selection_arrow.visible = true
+		_selection_arrow.position = selected_camper.position + SELECTION_ARROW_OFFSET \
+			+ Vector2(0, _selection_arrow_bump)
+		var energy_key := int(selected_camper.energy)
+		if selected_camper.plan_cell() != _edge_actions_plan_cell \
+				or energy_key != _edge_actions_energy_key:
+			_refresh_edge_actions()
+		_update_edge_action_display(get_global_mouse_position())
+	else:
+		_selection_arrow.visible = false
+		if _hovered_edge_index >= 0 or not edge_action_markers.get_children().is_empty():
+			_clear_edge_action_arrows()
 	if not selected_portrait.visible or not is_instance_valid(selected_camper):
 		return
 	selected_energy_bar.value = selected_camper.energy
@@ -168,18 +240,71 @@ func _process(_delta: float) -> void:
 
 func _on_focus_requested(camper: Node2D) -> void:
 	if is_instance_valid(camper):
-		create_tween().tween_property(camera, "position", camper.position, 0.3) \
-			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		_focus_world(camper.position)
+
+
+func _on_journal_focus_requested(cell: Vector2i) -> void:
+	_focus_world(cell_to_world(cell))
+	_highlight_tile(cell)
+
+
+func _focus_world(world_pos: Vector2) -> void:
+	create_tween().tween_property(camera, "position", world_pos, 0.3) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+
+## Pulses a diamond over `cell` so a journal location is easy to spot.
+func _highlight_tile(cell: Vector2i) -> void:
+	if cell.x < 0 or cell.y < 0 or cell.x >= map_w or cell.y >= map_h:
+		return
+	_clear_tile_highlight()
+	_tile_highlight = Node2D.new()
+	_tile_highlight.z_index = 15
+	_tile_highlight.position = cell_to_world(cell)
+	var diamond := PackedVector2Array([
+		Vector2(0, -16), Vector2(32, 0), Vector2(0, 16), Vector2(-32, 0),
+	])
+	var fill := Polygon2D.new()
+	fill.polygon = diamond
+	fill.color = Color(1.0, 0.95, 0.35, 0.35)
+	_tile_highlight.add_child(fill)
+	var outline := Line2D.new()
+	outline.points = PackedVector2Array([
+		Vector2(0, -16), Vector2(32, 0), Vector2(0, 16), Vector2(-32, 0), Vector2(0, -16),
+	])
+	outline.width = 1.5
+	outline.default_color = Color(1.0, 1.0, 0.55, 0.95)
+	outline.joint_mode = Line2D.LINE_JOINT_SHARP
+	_tile_highlight.add_child(outline)
+	_tile_highlight.modulate.a = 0.0
+	add_child(_tile_highlight)
+	_tile_highlight_tween = create_tween()
+	_tile_highlight_tween.tween_property(_tile_highlight, "modulate:a", 1.0, 0.12) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_tile_highlight_tween.tween_interval(0.85)
+	_tile_highlight_tween.tween_property(_tile_highlight, "modulate:a", 0.0, 0.45) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	_tile_highlight_tween.tween_callback(_clear_tile_highlight)
+
+
+func _clear_tile_highlight() -> void:
+	if _tile_highlight_tween != null:
+		_tile_highlight_tween.kill()
+		_tile_highlight_tween = null
+	if is_instance_valid(_tile_highlight):
+		_tile_highlight.queue_free()
+		_tile_highlight = null
 
 
 func _on_camper_selected(camper: Node2D) -> void:
 	if is_instance_valid(selected_camper) \
-			and selected_camper.actions_changed.is_connected(_refresh_waypoint_markers):
-		selected_camper.actions_changed.disconnect(_refresh_waypoint_markers)
+			and selected_camper.actions_changed.is_connected(_on_selected_actions_changed):
+		selected_camper.actions_changed.disconnect(_on_selected_actions_changed)
 	selected_camper = camper
 	if is_instance_valid(camper):
-		camper.actions_changed.connect(_refresh_waypoint_markers)
-	_refresh_waypoint_markers()
+		camper.actions_changed.connect(_on_selected_actions_changed)
+		_bump_selection_arrow()
+	_on_selected_actions_changed()
 	if not is_instance_valid(camper):
 		selected_portrait.hide()
 		inventory_popup.hide()
@@ -196,12 +321,33 @@ func _on_camper_selected(camper: Node2D) -> void:
 		inventory_popup.show_camper(camper)
 
 
+## Quick dip-and-settle on the selection arrow when the focused camper changes.
+func _bump_selection_arrow() -> void:
+	if _selection_arrow_tween != null:
+		_selection_arrow_tween.kill()
+	_selection_arrow_bump = 0.0
+	_selection_arrow_tween = create_tween()
+	_selection_arrow_tween.tween_property(self, "_selection_arrow_bump", 4.0, 0.07) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_selection_arrow_tween.tween_property(self, "_selection_arrow_bump", -1.5, 0.1) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	_selection_arrow_tween.tween_property(self, "_selection_arrow_bump", 0.0, 0.12) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+
+func _on_selected_actions_changed() -> void:
+	_refresh_waypoint_markers()
+	_refresh_edge_actions()
+
+
 func _on_inventory_button_pressed() -> void:
 	if is_instance_valid(selected_camper):
 		inventory_popup.show_camper(selected_camper)
 
 
 func _on_world_clicked(world_position: Vector2) -> void:
+	if _try_edge_action_click(world_position):
+		return
 	var closest: Node2D = null
 	var closest_dist := CAMPER_SELECT_RADIUS
 	for camper in campers:
@@ -213,10 +359,17 @@ func _on_world_clicked(world_position: Vector2) -> void:
 			closest = camper
 	if closest != null:
 		hud.select_camper(closest)
+		return
+	_queue_move_at(world_position)
 
 
-## Shift+click queues a waypoint for the selected camper.
+## Shift+click also queues a waypoint for the selected camper.
 func _on_world_shift_clicked(world_position: Vector2) -> void:
+	_queue_move_at(world_position)
+
+
+## Sends the selected camper toward a walkable, discovered cell.
+func _queue_move_at(world_position: Vector2) -> void:
 	if not is_instance_valid(selected_camper):
 		return
 	var cell := world_to_cell(world_position)
@@ -225,7 +378,7 @@ func _on_world_shift_clicked(world_position: Vector2) -> void:
 
 
 ## Diamond markers (with their order number) over the selected camper's
-## pending waypoints.
+## pending waypoints and cliff climbs.
 func _refresh_waypoint_markers() -> void:
 	for child in waypoint_markers.get_children():
 		child.queue_free()
@@ -233,7 +386,7 @@ func _refresh_waypoint_markers() -> void:
 		return
 	var number := 0
 	for action in selected_camper.actions:
-		if action.type != "walk":
+		if action.type != "walk" and action.type != "climb":
 			continue
 		number += 1
 		var marker := Polygon2D.new()
@@ -253,6 +406,116 @@ func _refresh_waypoint_markers() -> void:
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.position = marker.position - Vector2(12, 19)
 		waypoint_markers.add_child(label)
+
+
+## True when climb arrows should stay on the plan cell (last waypoint / climb
+## destination) so further climbs can be queued without hunting for edges.
+func _edge_actions_pinned() -> bool:
+	return is_instance_valid(selected_camper) \
+		and selected_camper.plan_cell() != selected_camper.cell
+
+
+func _update_edge_action_display(world_position: Vector2) -> void:
+	var best_index := -1
+	var best_dist := EDGE_ACTION_HIT_RADIUS
+	for i in _edge_action_hits.size():
+		var dist: float = world_position.distance_to(_edge_action_hits[i].pos)
+		if dist < best_dist:
+			best_dist = dist
+			best_index = i
+	var pinned := _edge_actions_pinned()
+	## Hover-only while standing on the plan cell; pin all arrows on the last
+	## waypoint so a climb can be queued ahead of the camper.
+	var want_count := _edge_action_hits.size() if pinned else (1 if best_index >= 0 else 0)
+	if best_index == _hovered_edge_index \
+			and edge_action_markers.get_child_count() == want_count:
+		return
+	_clear_edge_action_arrows()
+	_hovered_edge_index = best_index
+	if pinned:
+		for i in _edge_action_hits.size():
+			_spawn_edge_action_arrow(_edge_action_hits[i], i == best_index)
+	elif best_index >= 0:
+		_spawn_edge_action_arrow(_edge_action_hits[best_index], true)
+
+
+func _spawn_edge_action_arrow(hit: Dictionary, highlighted: bool) -> void:
+	var affordable: bool = selected_camper.energy >= hit.cost
+	var arrow := Label.new()
+	arrow.text = "▲" if hit.going_up else "▼"
+	arrow.add_theme_font_size_override("font_size", 14)
+	var tint: Color
+	if affordable:
+		tint = Color(0.45, 0.95, 0.55, 0.95) if hit.going_up else Color(0.55, 0.75, 1.0, 0.95)
+	else:
+		tint = Color(0.55, 0.55, 0.58, 0.75)
+	if not highlighted:
+		tint.a *= 0.7
+	arrow.add_theme_color_override("font_color", tint)
+	arrow.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85 if affordable else 0.45))
+	arrow.add_theme_constant_override("outline_size", 3)
+	arrow.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	arrow.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	arrow.custom_minimum_size = Vector2(20, 20)
+	arrow.position = hit.pos - Vector2(10, 10)
+	arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	edge_action_markers.add_child(arrow)
+
+
+func _clear_edge_action_arrows() -> void:
+	while edge_action_markers.get_child_count() > 0:
+		var child := edge_action_markers.get_child(0)
+		edge_action_markers.remove_child(child)
+		child.free()
+	_hovered_edge_index = -1
+
+
+func _refresh_edge_actions() -> void:
+	_clear_edge_action_arrows()
+	_edge_action_hits.clear()
+	_edge_actions_plan_cell = Vector2i(-999, -999)
+	_edge_actions_energy_key = -1
+	if not is_instance_valid(selected_camper):
+		return
+	## Always from the end of the queue (last waypoint / climb), so climbs can
+	## be planned after a walk and further walks after a climb.
+	var from: Vector2i = selected_camper.plan_cell()
+	_edge_actions_plan_cell = from
+	_edge_actions_energy_key = int(selected_camper.energy)
+	var from_world := cell_to_world(from)
+	for dir in TerrainGenerator.DIRS:
+		var neighbor: Vector2i = from + dir
+		if not can_cliff_climb(from, neighbor):
+			continue
+		if not fog.is_discovered(neighbor):
+			continue
+		var going_up: bool = level_at(neighbor) > level_at(from)
+		var cost := Camper.ENERGY_CLIMB_UP if going_up else Camper.ENERGY_CLIMB_DOWN
+		var neighbor_world := cell_to_world(neighbor)
+		var edge_pos := from_world.lerp(neighbor_world, 0.42)
+		_edge_action_hits.append({
+			"pos": edge_pos,
+			"target": neighbor,
+			"cost": cost,
+			"going_up": going_up,
+		})
+
+
+func _try_edge_action_click(world_position: Vector2) -> bool:
+	if not is_instance_valid(selected_camper) or _edge_action_hits.is_empty():
+		return false
+	var best: Dictionary = {}
+	var best_dist := EDGE_ACTION_HIT_RADIUS
+	for hit in _edge_action_hits:
+		var dist: float = world_position.distance_to(hit.pos)
+		if dist < best_dist:
+			best_dist = dist
+			best = hit
+	if best.is_empty():
+		return false
+	if selected_camper.add_climb(best.target):
+		_refresh_edge_actions()
+	return true
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -277,18 +540,25 @@ func regenerate() -> void:
 	barrier_cells.clear()
 	hidden_finds.clear()
 	collected_cards.clear()
+	journal_entries.clear()
 	campers.clear()
 	animals.clear()
 	selected_camper = null
+	_clear_tile_highlight()
 	inventory_popup.hide()
 	cards_tray.refresh(collected_cards)
 	cards_tray.popup.hide()
+	_refresh_journal()
+	journal_log.popup.hide()
 	for child in entities.get_children():
 		child.queue_free()
 	for child in birds.get_children():
 		child.queue_free()
 	for child in waypoint_markers.get_children():
 		child.queue_free()
+	for child in edge_action_markers.get_children():
+		child.queue_free()
+	_edge_action_hits.clear()
 	for child in debug_overlay.get_children():
 		child.queue_free()
 
@@ -340,7 +610,13 @@ func regenerate() -> void:
 	_scatter_barriers()
 	for find in data.get("discoverables", []):
 		_register_hidden_find(find.cell, find.kind)
+	_scatter_nest_finds()
 	_scatter_trap_finds()
+	_scatter_fishing_line_finds()
+	_scatter_leftover_food_finds()
+	_scatter_berry_finds()
+	_scatter_plant_finds()
+	_scatter_bird_tree_finds()
 	_build_navigation()
 	_spawn_campers()
 	_spawn_animals()
@@ -463,6 +739,24 @@ func _scatter_barriers() -> void:
 		prop_sprites[cell] = barrier
 
 
+## Bird-nest remnants on walkable cells next to fallen logs (ornithologist only).
+func _scatter_nest_finds() -> void:
+	var dirs: Array[Vector2i] = [
+		Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+		Vector2i(1, 1), Vector2i(1, -1), Vector2i(-1, 1), Vector2i(-1, -1),
+	]
+	for cell: Vector2i in prop_sprites:
+		var prop: Sprite2D = prop_sprites[cell]
+		if not is_instance_valid(prop) or prop.texture != LOG_TEXTURE:
+			continue
+		for d in dirs:
+			if rng.randf() >= NEST_AROUND_LOG_CHANCE:
+				continue
+			var n: Vector2i = cell + d
+			if _can_host_find(n):
+				_register_hidden_find(n, DiscoverableCards.KIND_BIRD_NEST_REMNANTS)
+
+
 ## Animal traps hidden on walkable ground next to barriers or trees.
 func _scatter_trap_finds() -> void:
 	var candidates: Array[Vector2i] = []
@@ -491,6 +785,124 @@ func _scatter_trap_finds() -> void:
 		_register_hidden_find(candidates[i], DiscoverableCards.KIND_ANIMAL_TRAP)
 
 
+## Discarded fishing line on walkable ground next to rivers and ponds.
+func _scatter_fishing_line_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	for y in map_h:
+		for x in map_w:
+			var cell := Vector2i(x, y)
+			if not _can_host_find(cell):
+				continue
+			if not is_near_water(cell):
+				continue
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(
+		rng.randi_range(FISHING_LINE_FIND_MIN, FISHING_LINE_FIND_MAX),
+		candidates.size(),
+	)
+	for i in count:
+		_register_hidden_find(candidates[i], DiscoverableCards.KIND_FISHING_LINE)
+
+
+## Leftover food scraps on open grass / forest — teaches wildlife to expect handouts.
+func _scatter_leftover_food_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	for y in map_h:
+		for x in map_w:
+			var cell := Vector2i(x, y)
+			if prop_sprites.has(cell) or tree_cells.has(cell):
+				continue
+			if not _can_host_find(cell):
+				continue
+			var tile: int = tiles[y][x]
+			if tile != TerrainGenerator.TILE_GRASS and tile != TerrainGenerator.TILE_FOREST:
+				continue
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(
+		rng.randi_range(LEFTOVER_FOOD_FIND_MIN, LEFTOVER_FOOD_FIND_MAX),
+		candidates.size(),
+	)
+	for i in count:
+		_register_hidden_find(candidates[i], DiscoverableCards.KIND_LEFTOVER_FOOD)
+
+
+## Ripe berry patches on open grass / forest — visible once fog reveals them.
+func _scatter_berry_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	for y in map_h:
+		for x in map_w:
+			var cell := Vector2i(x, y)
+			if prop_sprites.has(cell) or tree_cells.has(cell):
+				continue
+			if not _can_host_find(cell):
+				continue
+			var tile: int = tiles[y][x]
+			if tile != TerrainGenerator.TILE_GRASS and tile != TerrainGenerator.TILE_FOREST:
+				continue
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(rng.randi_range(BERRY_FIND_MIN, BERRY_FIND_MAX), candidates.size())
+	for i in count:
+		_register_hidden_find(candidates[i], DiscoverableCards.KIND_BERRIES)
+
+
+## Common plants on grass / forest — only a Botanist will notice them.
+func _scatter_plant_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	for y in map_h:
+		for x in map_w:
+			var cell := Vector2i(x, y)
+			if prop_sprites.has(cell) or tree_cells.has(cell):
+				continue
+			if not _can_host_find(cell):
+				continue
+			var tile: int = tiles[y][x]
+			if tile != TerrainGenerator.TILE_GRASS and tile != TerrainGenerator.TILE_FOREST:
+				continue
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var kinds: Array = DiscoverableCards.PLANT_KINDS
+	var count := mini(rng.randi_range(PLANT_FIND_MIN, PLANT_FIND_MAX), candidates.size())
+	for i in count:
+		var kind: String = kinds[rng.randi() % kinds.size()]
+		_register_hidden_find(candidates[i], kind)
+
+
+## Bird species perched in trees — only an Ornithologist will notice them.
+func _scatter_bird_tree_finds() -> void:
+	var candidates: Array[Vector2i] = []
+	for cell: Vector2i in tree_cells:
+		if hidden_finds.has(cell) or barrier_cells.has(cell):
+			continue
+		candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(rng.randi_range(BIRD_TREE_FIND_MIN, BIRD_TREE_FIND_MAX), candidates.size())
+	for i in count:
+		_register_hidden_find(candidates[i], DiscoverableCards.pick_bird_species(rng))
+
+
 func _can_host_find(cell: Vector2i) -> bool:
 	if cell.x < 0 or cell.y < 0 or cell.x >= map_w or cell.y >= map_h:
 		return false
@@ -512,6 +924,13 @@ func _register_hidden_find(cell: Vector2i, kind: String) -> void:
 		return
 	var detail := DiscoverableCards.pick_detail(kind, rng)
 	var sprite: Sprite2D = null
+	# Plant / bird-species finds have no map marker — role specialists notice them.
+	if DiscoverableCards.PLANT_KINDS.has(kind) \
+			or DiscoverableCards.BIRD_SPECIES_KINDS.has(kind):
+		hidden_finds[cell] = {
+			"kind": kind, "collected": false, "sprite": null, "detail": detail,
+		}
+		return
 	match kind:
 		DiscoverableCards.KIND_DEAD_BIRD:
 			sprite = _make_find_sprite(cell, BIRD_TEXTURE, Vector2(0, -2), Color(0.55, 0.5, 0.5))
@@ -524,6 +943,17 @@ func _register_hidden_find(cell: Vector2i, kind: String) -> void:
 			sprite.rotation_degrees = 75.0
 		DiscoverableCards.KIND_ANIMAL_TRAP:
 			sprite = _make_find_sprite(cell, TRAP_TEXTURE, Vector2(0, -2), Color.WHITE)
+		DiscoverableCards.KIND_BIRD_NEST_REMNANTS:
+			sprite = _make_find_sprite(cell, BIRD_TEXTURE, Vector2(0, -2), Color(0.7, 0.55, 0.4))
+			sprite.hframes = 2
+			sprite.frame = 0
+			sprite.scale = Vector2(0.7, 0.7)
+		DiscoverableCards.KIND_BERRIES:
+			var marker := _make_berry_marker(cell)
+			hidden_finds[cell] = {
+				"kind": kind, "collected": false, "sprite": marker, "detail": detail,
+			}
+			return
 		DiscoverableCards.KIND_FORBIDDEN_CUT:
 			if prop_sprites.has(cell):
 				sprite = prop_sprites[cell]
@@ -534,6 +964,24 @@ func _register_hidden_find(cell: Vector2i, kind: String) -> void:
 			# Log stays fog-gated; the card itself is still hidden until inspect.
 			hidden_finds[cell] = {
 				"kind": kind, "collected": false, "sprite": sprite, "detail": detail,
+			}
+			return
+		DiscoverableCards.KIND_DRIED_GROUND:
+			# The dried tile is the visual; no extra sprite until inspected.
+			hidden_finds[cell] = {
+				"kind": kind, "collected": false, "sprite": null, "detail": detail,
+			}
+			return
+		DiscoverableCards.KIND_FISHING_LINE:
+			# Monofilament is nearly invisible on the bank until inspected.
+			hidden_finds[cell] = {
+				"kind": kind, "collected": false, "sprite": null, "detail": detail,
+			}
+			return
+		DiscoverableCards.KIND_LEFTOVER_FOOD:
+			# Scraps stay unnoticed until a camper inspects the ground.
+			hidden_finds[cell] = {
+				"kind": kind, "collected": false, "sprite": null, "detail": detail,
 			}
 			return
 		_:
@@ -554,27 +1002,107 @@ func _make_find_sprite(cell: Vector2i, texture: Texture2D, offset: Vector2, modu
 	return sprite
 
 
-## Called when a camper finishes inspecting: reveals and returns any cards on
-## or next to `center` that have not been collected yet — including wounded
-## animals standing nearby.
-func try_discover_nearby(center: Vector2i) -> Array[Dictionary]:
-	var cards: Array[Dictionary] = []
+## Fog-gated berry bush marker — Sprite2D so it stays on the berry cell
+## (Label-under-Node2D can drift onto neighbouring empty tiles).
+func _make_berry_marker(cell: Vector2i) -> Node2D:
+	var sprite := Sprite2D.new()
+	sprite.texture = _berry_marker_texture()
+	sprite.centered = true
+	sprite.offset = Vector2(0, -6)
+	sprite.position = cell_to_world(cell)
+	sprite.visible = fog.is_discovered(cell)
+	entities.add_child(sprite)
+	return sprite
+
+
+## Tiny procedural 🫐 stand-in shared by every berry patch marker.
+func _berry_marker_texture() -> Texture2D:
+	if _berry_texture != null:
+		return _berry_texture
+	var img := Image.create(10, 10, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var berry := Color("4a3a8a")
+	var highlight := Color("7a6aba")
+	for y in 10:
+		for x in 10:
+			var d0 := Vector2(x - 3.5, y - 4.5).length()
+			var d1 := Vector2(x - 6.5, y - 5.0).length()
+			var d2 := Vector2(x - 5.0, y - 3.0).length()
+			if d0 <= 2.4 or d1 <= 2.2 or d2 <= 2.0:
+				var c := berry
+				if d0 <= 1.0 or d1 <= 0.9 or d2 <= 0.8:
+					c = highlight
+				img.set_pixel(x, y, c)
+	# Stem.
+	img.set_pixel(5, 1, Color("2f5a28"))
+	img.set_pixel(4, 0, Color("3a6b35"))
+	_berry_texture = ImageTexture.create_from_image(img)
+	return _berry_texture
+
+
+## Removes a berry patch from the map after it is picked into inventory.
+func _consume_find(cell: Vector2i, remove_sprite: bool = false) -> void:
+	if not hidden_finds.has(cell):
+		return
+	var find: Dictionary = hidden_finds[cell]
+	find["collected"] = true
+	if remove_sprite:
+		var marker = find.get("sprite")
+		if is_instance_valid(marker):
+			marker.queue_free()
+		find["sprite"] = null
+	hidden_finds[cell] = find
+
+
+## Forage a nearby berry patch into inventory.
+## Returns {"item": Dictionary, "cell": Vector2i}, or {} if none.
+func try_forage_berries(center: Vector2i) -> Dictionary:
 	for y in range(center.y - INSPECT_FIND_RADIUS, center.y + INSPECT_FIND_RADIUS + 1):
 		for x in range(center.x - INSPECT_FIND_RADIUS, center.x + INSPECT_FIND_RADIUS + 1):
 			var cell := Vector2i(x, y)
 			if not hidden_finds.has(cell):
 				continue
 			var find: Dictionary = hidden_finds[cell]
-			if find.collected:
+			if find.kind != DiscoverableCards.KIND_BERRIES or find.get("collected", false):
 				continue
-			find.collected = true
-			var sprite: Sprite2D = find.sprite
+			var item := DiscoverableCards.make_item(
+				DiscoverableCards.KIND_BERRIES, find.get("detail", "")
+			)
+			_consume_find(cell, true)
+			return {"item": item, "cell": cell}
+	return {}
+
+
+## Called when a camper succeeds a find roll: reveals and returns any cards on
+## or next to `center` that have not been collected yet — including wounded
+## animals standing nearby and (for Ornithologists) flying birds that pass close.
+## Role-gated finds (e.g. nest remnants, plants, bird species) are skipped
+## unless `finder_roles` includes the required role; those stay hidden.
+## Berry patches are forage-only and ignored here.
+## Each result is {"item": Dictionary, "cell": Vector2i}.
+func try_discover_nearby(center: Vector2i, finder_roles: Array = []) -> Array[Dictionary]:
+	var results: Array[Dictionary] = []
+	for y in range(center.y - INSPECT_FIND_RADIUS, center.y + INSPECT_FIND_RADIUS + 1):
+		for x in range(center.x - INSPECT_FIND_RADIUS, center.x + INSPECT_FIND_RADIUS + 1):
+			var cell := Vector2i(x, y)
+			if not hidden_finds.has(cell):
+				continue
+			var find: Dictionary = hidden_finds[cell]
+			if find.get("collected", false):
+				continue
+			if find.kind == DiscoverableCards.KIND_BERRIES:
+				continue
+			var need_role := DiscoverableCards.required_role(find.kind)
+			if not need_role.is_empty() and not finder_roles.has(need_role):
+				continue
+			_consume_find(cell, false)
+			var sprite = find.get("sprite")
 			if is_instance_valid(sprite):
 				sprite.visible = true
 				if find.kind == DiscoverableCards.KIND_FORBIDDEN_CUT:
 					sprite.modulate = Color(1.0, 0.75, 0.55)
 			var item := DiscoverableCards.make_item(find.kind, find.get("detail", ""))
-			cards.append(item)
+			results.append({"item": item, "cell": cell})
 			_show_find_toast(cell_to_world(cell), DiscoverableCards.localize(item).name)
 	for animal in animals:
 		if not is_instance_valid(animal) or not animal.has_wounded_card \
@@ -586,11 +1114,31 @@ func try_discover_nearby(center: Vector2i) -> Array[Dictionary]:
 		animal.reveal_wound()
 		var detail := DiscoverableCards.pick_detail(DiscoverableCards.KIND_WOUNDED_ANIMAL, rng)
 		var item := DiscoverableCards.make_item(DiscoverableCards.KIND_WOUNDED_ANIMAL, detail)
-		cards.append(item)
+		results.append({"item": item, "cell": animal.cell})
 		_show_find_toast(animal.position, DiscoverableCards.localize(item).name)
-	if not cards.is_empty():
+	if finder_roles.has("Ornithologist"):
+		var center_pos := cell_to_world(center)
+		for child in birds.get_children():
+			var bird := child as Animal
+			if bird == null or bird.bird_kind.is_empty() or bird.bird_kind_collected:
+				continue
+			if center_pos.distance_to(bird.position) > BIRD_SIGHTING_RADIUS:
+				continue
+			bird.mark_bird_identified()
+			var bird_cell: Vector2i = layers[0].local_to_map(
+				bird.position + Vector2(0, Animal.BIRD_FLY_HEIGHT)
+			)
+			bird_cell = bird_cell.clamp(Vector2i.ZERO, Vector2i(map_w - 1, map_h - 1))
+			var detail := DiscoverableCards.pick_detail(bird.bird_kind, rng)
+			var item := DiscoverableCards.make_item(bird.bird_kind, detail)
+			results.append({"item": item, "cell": bird_cell})
+			_show_find_toast(bird.position, DiscoverableCards.localize(item).name)
+	if not results.is_empty():
+		var cards: Array[Dictionary] = []
+		for result in results:
+			cards.append(result.item)
 		collect_cards(cards)
-	return cards
+	return results
 
 
 ## Adds evidence cards to the team collection and refreshes the corner badge.
@@ -598,6 +1146,114 @@ func collect_cards(cards: Array[Dictionary]) -> void:
 	for card in cards:
 		collected_cards.append(card)
 	cards_tray.refresh(collected_cards)
+
+
+## Appends a journal event (msgid + camper + cell) and refreshes the log UI.
+func log_journal(entry: Dictionary) -> void:
+	if not entry.has("treated"):
+		entry["treated"] = false
+	if not entry.has("actions"):
+		entry["actions"] = []
+	journal_entries.append(entry)
+	_refresh_journal()
+
+
+## Logs a discovered card (or berry) as a journal event at `cell`.
+## Skips if this kind was already logged for this exact tile.
+func log_journal_find(card: Dictionary, finder: String, cell: Vector2i) -> void:
+	var kind: String = str(card.get("id", ""))
+	for entry in journal_entries:
+		if entry.get("kind", "") == kind and entry.get("cell", Vector2i(-1, -1)) == cell:
+			return
+	var msgid := DiscoverableCards.journal_msgid(kind)
+	if msgid.is_empty():
+		msgid = "%s found evidence"
+	log_journal({
+		"icon": card.get("icon", "📝"),
+		"msgid": msgid,
+		"camper": finder,
+		"cell": cell,
+		"kind": kind,
+		"treated": false,
+		"actions": [],
+	})
+
+
+## Maps each role msgid to the first camper on the team who holds it.
+func _team_role_holders() -> Dictionary:
+	var holders := {}
+	for camper in campers:
+		if not is_instance_valid(camper):
+			continue
+		for role in camper.roles:
+			if not holders.has(role):
+				holders[role] = camper.display_name
+	return holders
+
+
+## How many untreated evidence entries the current team can actually respond to.
+func _solvable_untreated_count() -> int:
+	var holders := _team_role_holders()
+	var n := 0
+	for entry in journal_entries:
+		if entry.get("treated", false):
+			continue
+		var kind: String = str(entry.get("kind", ""))
+		if not DiscoverableCards.solve_actions_for(kind, holders).is_empty():
+			n += 1
+	return n
+
+
+func _refresh_journal() -> void:
+	journal_log.refresh(journal_entries, _solvable_untreated_count())
+
+
+## Solve untreated evidence events: each unique kind gets role actions once;
+## every matching entry is marked treated. Actions appear on the newest of each kind.
+func solve_journal_events() -> Dictionary:
+	var holders := _team_role_holders()
+	var kind_actions := {}
+	var starred_kinds := {}
+	var treated_count := 0
+	var action_count := 0
+	# Newest first so the starred row sits near the top of the journal list.
+	for i in range(journal_entries.size() - 1, -1, -1):
+		var entry: Dictionary = journal_entries[i]
+		if entry.get("treated", false):
+			continue
+		var kind: String = str(entry.get("kind", ""))
+		if not DiscoverableCards.is_solvable(kind):
+			continue
+		if not kind_actions.has(kind):
+			kind_actions[kind] = DiscoverableCards.solve_actions_for(kind, holders)
+		var actions: Array = kind_actions[kind]
+		if actions.is_empty():
+			continue
+		if not starred_kinds.has(kind):
+			entry["actions"] = actions.duplicate(true)
+			entry["starred"] = true
+			starred_kinds[kind] = true
+			action_count += actions.size()
+		entry["treated"] = true
+		treated_count += 1
+	_refresh_journal()
+	return {"treated": treated_count, "actions": action_count}
+
+
+func _on_journal_solve_requested() -> void:
+	var result := solve_journal_events()
+	if result.treated <= 0:
+		_show_find_toast(camera.position, tr("No untreated events the team can solve"))
+	else:
+		_show_find_toast(
+			camera.position,
+			tr("%d events treated · %d actions") % [result.treated, result.actions],
+		)
+
+
+## Brief floating label over a newly revealed find.
+func show_find_toast(world_pos: Vector2, text: String) -> void:
+	_show_find_toast(world_pos, text)
 
 
 ## Brief floating label over a newly revealed find.
@@ -739,6 +1395,14 @@ func _on_cells_revealed(cells: Array[Vector2i]) -> void:
 	for cell in cells:
 		if prop_sprites.has(cell):
 			prop_sprites[cell].visible = true
+		if not hidden_finds.has(cell):
+			continue
+		var find: Dictionary = hidden_finds[cell]
+		if find.kind != DiscoverableCards.KIND_BERRIES or find.collected:
+			continue
+		var marker = find.get("sprite")
+		if is_instance_valid(marker):
+			marker.visible = true
 
 
 func is_walkable(cell: Vector2i) -> bool:
@@ -750,6 +1414,8 @@ func is_walkable(cell: Vector2i) -> bool:
 	return tile == TerrainGenerator.TILE_SAND \
 		or tile == TerrainGenerator.TILE_GRASS \
 		or tile == TerrainGenerator.TILE_FOREST \
+		or tile == TerrainGenerator.TILE_ROCK \
+		or tile == TerrainGenerator.TILE_DRIED_GROUND \
 		or TerrainGenerator.is_road(tile) \
 		or TerrainGenerator.is_ramp(tile)
 
@@ -778,6 +1444,19 @@ func _can_step(a: Vector2i, b: Vector2i) -> bool:
 	var lower_tile: int = tiles[lower.y][lower.x]
 	return TerrainGenerator.is_ramp(lower_tile) \
 		and lower + TerrainGenerator.ramp_dir(lower_tile) == higher
+
+
+## Cliff climb: orthogonal neighbour one level up/down that is walkable but
+## not already ramp-connected (those use normal walking).
+func can_cliff_climb(from: Vector2i, to: Vector2i) -> bool:
+	if not is_walkable(from) or not is_walkable(to):
+		return false
+	var step := to - from
+	if absi(step.x) + absi(step.y) != 1:
+		return false
+	if absi(level_at(from) - level_at(to)) != 1:
+		return false
+	return not _can_step(from, to)
 
 
 ## A diagonal step crosses the corner shared with two orthogonal neighbours.

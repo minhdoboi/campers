@@ -11,9 +11,11 @@ const TILE_ROCK := 5
 ## Asphalt car roads: X runs along grid ±x, Y along grid ±y (separate art).
 const TILE_ROAD_X := 6
 const TILE_ROAD_Y := 7
+## Cracked drought soil — placed only under clear (no rain, no cloud) skies.
+const TILE_DRIED_GROUND := 8
 # Directional ramps: each one rises toward a single neighbor and only
 # connects the two levels along that direction.
-const TILE_RAMP_FIRST := 8 # +x, then -x, -y, +y (matches RAMP_DIRS)
+const TILE_RAMP_FIRST := 9 # +x, then -x, -y, +y (matches RAMP_DIRS)
 const TILE_RAMP_COUNT := 4
 
 ## Direction to the higher neighbor for tile TILE_RAMP_FIRST + i.
@@ -27,6 +29,11 @@ const BARRIER_CHANCE := 0.12
 ## How many hidden roadside evidence cards to scatter (dead bird / beaver).
 const ROADSIDE_FIND_MIN := 2
 const ROADSIDE_FIND_MAX := 4
+## How many grass cells to parch into dried ground on clear parcels.
+const DRIED_TILE_MIN := 14
+const DRIED_TILE_MAX := 28
+## Chance a dried-ground tile also hides a "dried ground" evidence card.
+const DRIED_CARD_CHANCE := 0.32
 
 ## Parcel sky conditions rolled during generation. Cloudy and rainy both get
 ## drifting cloud shadows; rainy also spawns rain particles.
@@ -116,12 +123,17 @@ static func generate(width: int, height: int, seed_value: int) -> Dictionary:
 	var discoverables := _place_roadside_finds(
 		tiles, levels, road_cells, barriers, width, height, rng)
 	var avg_moisture := moisture_sum / float(moisture_count)
+	var weather := _roll_weather(rng, avg_moisture)
+	# Clear skies only: parch some grass and hide drought evidence on a few.
+	if weather == WEATHER_CLEAR:
+		discoverables.append_array(
+			_place_dried_ground(tiles, levels, barriers, width, height, rng))
 	return {
 		"tiles": tiles,
 		"levels": levels,
 		"barriers": barriers,
 		"discoverables": discoverables,
-		"weather": _roll_weather(rng, avg_moisture),
+		"weather": weather,
 		"weather_seed": seed_value + 3000,
 	}
 
@@ -314,6 +326,43 @@ static func _place_roadside_finds(
 	var finds: Array = []
 	for i in count:
 		finds.append({"cell": shoulders[i], "kind": kinds[rng.randi() % kinds.size()]})
+	return finds
+
+
+## Under clear skies, converts scattered grass cells to cracked dried ground
+## and hides a "dried ground" card on some of them.
+static func _place_dried_ground(
+	tiles: Array, _levels: Array, barriers: Array[Vector2i],
+	width: int, height: int, rng: RandomNumberGenerator
+) -> Array:
+	var blocked := {}
+	for cell in barriers:
+		blocked[cell] = true
+	var candidates: Array[Vector2i] = []
+	for y in height:
+		for x in width:
+			var cell := Vector2i(x, y)
+			if blocked.has(cell):
+				continue
+			if tiles[y][x] != TILE_GRASS:
+				continue
+			candidates.append(cell)
+	for i in range(candidates.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp := candidates[i]
+		candidates[i] = candidates[j]
+		candidates[j] = tmp
+	var count := mini(rng.randi_range(DRIED_TILE_MIN, DRIED_TILE_MAX), candidates.size())
+	var dried: Array[Vector2i] = []
+	for i in count:
+		var cell: Vector2i = candidates[i]
+		tiles[cell.y][cell.x] = TILE_DRIED_GROUND
+		dried.append(cell)
+	var finds: Array = []
+	for cell in dried:
+		if rng.randf() >= DRIED_CARD_CHANCE:
+			continue
+		finds.append({"cell": cell, "kind": DiscoverableCards.KIND_DRIED_GROUND})
 	return finds
 
 

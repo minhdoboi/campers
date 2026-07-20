@@ -26,6 +26,9 @@ var cell: Vector2i
 ## When true, inspecting near this animal yields a "wounded animal" card.
 var has_wounded_card := false
 var wounded_card_collected := false
+## Flying birds carry a species card an Ornithologist can identify once.
+var bird_kind := ""
+var bird_kind_collected := false
 
 var _path: Array = []
 var _idle := 0.0
@@ -50,6 +53,7 @@ func setup(game_node: Node2D, start_cell: Vector2i, animal_species: Species) -> 
 			texture = BIRD_TEXTURE
 			hframes = 2
 			position = game.cell_to_world(cell) + Vector2(0, -BIRD_FLY_HEIGHT)
+			bird_kind = DiscoverableCards.pick_bird_species(game.rng)
 			_pick_fly_target()
 
 
@@ -65,6 +69,11 @@ func mark_wounded() -> void:
 func reveal_wound() -> void:
 	wounded_card_collected = true
 	modulate = Color(1.0, 0.72, 0.68)
+
+
+## Called when an Ornithologist identifies this flying bird's species.
+func mark_bird_identified() -> void:
+	bird_kind_collected = true
 
 
 func _process(delta: float) -> void:

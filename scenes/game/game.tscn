@@ -1,4 +1,4 @@
-[gd_scene load_steps=11 format=3]
+[gd_scene load_steps=12 format=3]
 
 [ext_resource type="Script" path="res://scenes/game/game.gd" id="1_game"]
 [ext_resource type="Script" path="res://scenes/game/fog_of_war.gd" id="6_fog"]
@@ -8,6 +8,7 @@
 [ext_resource type="Script" path="res://scenes/game/inventory_popup.gd" id="5_inventory"]
 [ext_resource type="Script" path="res://scenes/game/weather.gd" id="7_weather"]
 [ext_resource type="Script" path="res://scenes/game/cards_tray.gd" id="8_cards"]
+[ext_resource type="Script" path="res://scenes/game/journal_log.gd" id="9_journal"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_hint"]
 content_margin_left = 12.0
@@ -63,6 +64,8 @@ script = ExtResource("6_fog")
 
 [node name="DebugOverlay" type="Node2D" parent="."]
 
+[node name="EdgeActionMarkers" type="Node2D" parent="."]
+
 [node name="Camera" type="Camera2D" parent="."]
 script = ExtResource("3_camera")
 
@@ -75,7 +78,7 @@ offset_right = 720.0
 offset_bottom = 48.0
 theme_override_colors/font_color = Color(1, 1, 1, 0.85)
 theme_override_styles/normal = SubResource("StyleBoxFlat_hint")
-text = "WASD / arrows: pan   ·   wheel: zoom   ·   middle-drag: pan   ·   shift+click: add waypoint   ·   space: pause   ·   R: new parcel   ·   Esc: menu"
+text = "WASD / arrows: pan   ·   wheel: zoom   ·   middle-drag: pan   ·   click: move   ·   space: pause   ·   R: new parcel   ·   Esc: menu"
 
 [node name="PauseBanner" type="Label" parent="UI"]
 visible = false
@@ -219,6 +222,101 @@ text = "✕"
 unique_name_in_owner = true
 layout_mode = 2
 theme_override_constants/separation = 6
+
+[node name="JournalLog" type="Control" parent="UI"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -176.0
+offset_top = 16.0
+offset_right = -96.0
+offset_bottom = 72.0
+grow_horizontal = 0
+script = ExtResource("9_journal")
+
+[node name="JournalBadge" type="Button" parent="UI/JournalLog"]
+unique_name_in_owner = true
+layout_mode = 0
+offset_right = 72.0
+offset_bottom = 48.0
+focus_mode = 0
+theme_override_styles/normal = SubResource("StyleBoxFlat_hud")
+theme_override_styles/hover = SubResource("StyleBoxFlat_hud")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_hud")
+
+[node name="BadgeRow" type="HBoxContainer" parent="UI/JournalLog/JournalBadge"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 6
+alignment = 1
+
+[node name="JournalIcon" type="Label" parent="UI/JournalLog/JournalBadge/BadgeRow"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "📔"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="JournalCount" type="Label" parent="UI/JournalLog/JournalBadge/BadgeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "0"
+vertical_alignment = 1
+
+[node name="JournalPopup" type="PanelContainer" parent="UI/JournalLog"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 0
+offset_left = -360.0
+offset_top = 56.0
+offset_right = 72.0
+offset_bottom = 400.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_hud")
+
+[node name="Layout" type="VBoxContainer" parent="UI/JournalLog/JournalPopup"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="TopRow" type="HBoxContainer" parent="UI/JournalLog/JournalPopup/Layout"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="JournalTitle" type="Label" parent="UI/JournalLog/JournalPopup/Layout/TopRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 16
+text = "Journal"
+
+[node name="JournalCloseButton" type="Button" parent="UI/JournalLog/JournalPopup/Layout/TopRow"]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+flat = true
+text = "✕"
+
+[node name="Scroll" type="ScrollContainer" parent="UI/JournalLog/JournalPopup/Layout"]
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 260)
+
+[node name="JournalList" type="VBoxContainer" parent="UI/JournalLog/JournalPopup/Layout/Scroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 8
+
+[node name="JournalSolveButton" type="Button" parent="UI/JournalLog/JournalPopup/Layout"]
+unique_name_in_owner = true
+layout_mode = 2
+focus_mode = 0
+disabled = true
+text = "Solve"
 
 [node name="CardsTray" type="Control" parent="UI"]
 anchors_preset = 1

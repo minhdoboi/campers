@@ -39,13 +39,14 @@ func _save(img: Image, path: String) -> void:
 # Top 32px is the diamond, bottom 16px is a cliff "skirt" shown when the
 # tile sits above a lower elevation level.
 # 0 deep water, 1 water, 2 sand, 3 grass, 4 forest floor, 5 rock,
-# 6 road along grid X, 7 road along grid Y
+# 6 road along grid X, 7 road along grid Y, 8 dried cracked ground
 # (ramps live in a separate ramps.png, drawn as sprites over a grass base)
 
 const TILE_TEX_H := 48
 const SKIRT_H := 16
 const TILE_ROAD_X_INDEX := 6
 const TILE_ROAD_Y_INDEX := 7
+const TILE_DRIED_INDEX := 8
 
 func _make_tiles() -> void:
 	var bases: Array[Color] = [
@@ -57,6 +58,7 @@ func _make_tiles() -> void:
 		Color("8d8d85"), # rock
 		Color("4a4a4e"), # asphalt road along +x
 		Color("4a4a4e"), # asphalt road along +y
+		Color("c4a06a"), # dried cracked ground
 	]
 	var img := Image.create(TILE_W * bases.size(), TILE_TEX_H, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
@@ -91,11 +93,32 @@ func _draw_diamond(img: Image, ox: int, base: Color, tile_index: int) -> void:
 			# Asphalt: dashed line follows the isometric travel axis.
 			if tile_index == TILE_ROAD_X_INDEX or tile_index == TILE_ROAD_Y_INDEX:
 				c = _road_pixel(c, float(x) - cx, float(y) - cy, tile_index == TILE_ROAD_X_INDEX, r)
+			# Drought cracks on dried ground.
+			if tile_index == TILE_DRIED_INDEX:
+				c = _dried_pixel(c, float(x) - cx, float(y) - cy, r)
 			# Darken the diamond rim so tiles read individually.
 			var on_edge: bool = x <= x_start or x >= x_end - 1 or y == 0 or y == TILE_H - 1
 			if on_edge:
 				c = c.darkened(0.18)
 			img.set_pixel(ox + x, y, c)
+
+
+## Pale cracked earth: branching dark fissures across the diamond.
+func _dried_pixel(base: Color, dx: float, dy: float, noise: float) -> Color:
+	var c := base
+	# Main crack along a SE diagonal, plus a shorter cross crack.
+	var crack_a := absf(dx - 1.6 * dy - 2.0)
+	var crack_b := absf(dx + 2.2 * dy + 4.0)
+	var crack_c := absf(dx * 0.4 + dy - 3.0)
+	if crack_a < 1.1 or crack_b < 0.9 or crack_c < 0.75:
+		c = Color("6e4f2e")
+	elif crack_a < 2.0 or crack_b < 1.6:
+		c = c.darkened(0.18)
+	elif noise < 0.12:
+		c = c.darkened(0.10)
+	elif noise > 0.92:
+		c = c.lightened(0.08)
+	return c
 
 
 ## Road markings in diamond space. Grid +x travels along the SE iso diagonal
